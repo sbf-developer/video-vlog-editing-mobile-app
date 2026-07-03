@@ -7,6 +7,8 @@ import React, {
   useState,
 } from 'react';
 
+import { v4 as uuidv4 } from 'uuid';
+
 import type { AudioTrack, Clip, VlogSession } from '@/lib/types';
 import {
   copyMediaToSession,
@@ -20,6 +22,7 @@ import {
   saveSessions,
   sortSessionsByUpdated,
 } from '@/lib/storage';
+import { probeVideoDurationMs } from '@/lib/videoMeta';
 
 type VlogContextValue = {
   sessions: VlogSession[];
@@ -44,6 +47,7 @@ type VlogContextValue = {
     label: string,
   ) => Promise<AudioTrack | null>;
   removeAudioTrack: (sessionId: string, trackId: string) => Promise<void>;
+  splitClip: (sessionId: string, clipId: string, splitAtSourceMs: number) => Promise<void>;
   refresh: () => Promise<void>;
 };
 
@@ -126,7 +130,11 @@ export function VlogProvider({ children }: { children: React.ReactNode }) {
 
       const ext = getClipExtension(sourceUri, type);
       const { uri: destUri, filename } = await copyMediaToSession(sessionId, sourceUri, ext);
-      const clip = createClip(type, destUri, filename, durationMs);
+      let resolvedDuration = durationMs;
+      if (type === 'video' && resolvedDuration <= 0) {
+        resolvedDuration = await probeVideoDurationMs(destUri);
+      }
+      const clip = createClip(type, destUri, filename, resolvedDuration);
 
       const next = sessions.map((s) =>
         s.id === sessionId ? touchSession({ ...s, clips: [...s.clips, clip] }) : s,
@@ -215,6 +223,47 @@ export function VlogProvider({ children }: { children: React.ReactNode }) {
     [persist, sessions],
   );
 
+  const splitClip = useCallback(
+    async (sessionId: string, clipId: string, splitAtSourceMs: number) => {
+      const session = sessions.find((s) => s.id === sessionId);
+      const clip = session?.clips.find((c) => c.id === clipId);
+      if (!session || !clip || clip.type !== 'video') return;
+
+      const endMs = clip.trimEndMs > 0 ? clip.trimEndMs : clip.durationMs;
+      const minGap = 300;
+      if (
+        splitAtSourceMs <= clip.trimStartMs + minGap ||
+        splitAtSourceMs >= endMs - minGap
+      ) {
+        return;
+      }
+
+      const first: Clip = {
+        ...clip,
+        trimEndMs: splitAtSourceMs,
+      };
+      const second: Clip = {
+        ...clip,
+        id: uuidv4(),
+        trimStartMs: splitAtSourceMs,
+        trimEndMs: endMs,
+        textOverlays: [],
+        createdAt: new Date().toISOString(),
+      };
+
+      const next = sessions.map((s) => {
+        if (s.id !== sessionId) return s;
+        const index = s.clips.findIndex((c) => c.id === clipId);
+        if (index < 0) return s;
+        const clips = [...s.clips];
+        clips.splice(index, 1, first, second);
+        return touchSession({ ...s, clips });
+      });
+      await persist(next);
+    },
+    [persist, sessions],
+  );
+
   const value = useMemo(
     () => ({
       sessions,
@@ -229,6 +278,7 @@ export function VlogProvider({ children }: { children: React.ReactNode }) {
       reorderClips,
       addAudioFromUri,
       removeAudioTrack,
+      splitClip,
       refresh,
     }),
     [
@@ -244,6 +294,7 @@ export function VlogProvider({ children }: { children: React.ReactNode }) {
       reorderClips,
       addAudioFromUri,
       removeAudioTrack,
+      splitClip,
       refresh,
     ],
   );

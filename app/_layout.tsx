@@ -1,3 +1,4 @@
+import 'react-native-gesture-handler';
 import {
   Inter_400Regular,
   Inter_500Medium,
@@ -35,14 +36,10 @@ export default function RootLayout() {
   }, [error]);
 
   useEffect(() => {
-    if (loaded) {
+    if (loaded || error) {
       SplashScreen.hideAsync();
     }
-  }, [loaded]);
-
-  if (!loaded) {
-    return null;
-  }
+  }, [loaded, error]);
 
   return <RootLayoutNav />;
 }

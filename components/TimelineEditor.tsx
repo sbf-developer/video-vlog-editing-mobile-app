@@ -15,15 +15,20 @@ import { useThemeWithSpacing } from '@/hooks/useTheme';
 import { confirmAction } from '@/lib/confirm';
 import { formatDuration, getClipDurationMs, getTotalDurationMs } from '@/lib/duration';
 import type { AudioTrack, Clip, VlogSession } from '@/lib/types';
+import { clampTrimEnd, clampTrimStart, getClipBounds } from '@/lib/videoMeta';
 
 const PX_PER_SEC = 32;
-const MIN_CLIP_WIDTH = 64;
+const MIN_CLIP_WIDTH = 48;
 const TRACK_HEIGHT = 72;
 const GAP = 6;
+const HANDLE_WIDTH = 14;
+const MIN_SPLIT_GAP_MS = 400;
 
 type TimelineEditorProps = {
   session: VlogSession;
   onEditClip: (clipId: string) => void;
+  onUpdateClip: (clipId: string, updates: Partial<Clip>) => void;
+  onSplitClip: (clipId: string, splitAtSourceMs: number) => void;
   onDeleteClip: (clipId: string) => void;
   onReorderClips: (clipIds: string[]) => void;
   onDeleteAudio: (trackId: string) => void;
@@ -42,9 +47,15 @@ function audioWidth(track: AudioTrack): number {
   return Math.max(MIN_CLIP_WIDTH, (track.durationMs / 1000) * PX_PER_SEC);
 }
 
+function msFromDx(dx: number): number {
+  return Math.round((dx / PX_PER_SEC) * 1000);
+}
+
 export function TimelineEditor({
   session,
   onEditClip,
+  onUpdateClip,
+  onSplitClip,
   onDeleteClip,
   onReorderClips,
   onDeleteAudio,
@@ -58,10 +69,17 @@ export function TimelineEditor({
   const [selectedClipId, setSelectedClipId] = useState<string | null>(session.clips[0]?.id ?? null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [playheadMs, setPlayheadMs] = useState(0);
   const layoutsRef = useRef<{ id: string; x: number; width: number }[]>([]);
 
   const selectedClip = session.clips.find((c) => c.id === selectedClipId) ?? session.clips[0] ?? null;
   const totalMs = getTotalDurationMs(session.clips);
+  const selectedBounds = selectedClip ? getClipBounds(selectedClip) : null;
+  const canSplit =
+    selectedClip?.type === 'video' &&
+    selectedBounds &&
+    playheadMs >= selectedBounds.startMs + MIN_SPLIT_GAP_MS &&
+    playheadMs <= selectedBounds.endMs - MIN_SPLIT_GAP_MS;
 
   const layouts = useMemo(() => {
     let x = 0;
@@ -101,11 +119,20 @@ export function TimelineEditor({
     return Math.max(0, layoutsRef.current.length - 1);
   };
 
+  const handleSplit = () => {
+    if (!selectedClip || !canSplit) return;
+    onSplitClip(selectedClip.id, Math.round(playheadMs));
+  };
+
   return (
     <View style={styles.container}>
       <View style={[styles.previewWrap, { backgroundColor: colors.surfaceSecondary, borderRadius: radius.md }]}>
         {selectedClip ? (
-          <ClipPreview clip={selectedClip} autoPlay={false} />
+          <ClipPreview
+            clip={selectedClip}
+            autoPlay={false}
+            onTimeUpdate={setPlayheadMs}
+          />
         ) : (
           <View style={styles.previewEmpty}>
             <Ionicons name="film-outline" size={40} color={colors.textMuted} />
@@ -115,6 +142,33 @@ export function TimelineEditor({
           </View>
         )}
       </View>
+
+      {selectedClip ? (
+        <View style={[styles.editBar, { paddingHorizontal: spacing.md, marginBottom: 8 }]}>
+          <Button
+            label="Split"
+            icon="cut-outline"
+            variant="secondary"
+            onPress={handleSplit}
+            disabled={!canSplit}
+            style={{ flex: 1 }}
+          />
+          <Button
+            label="Text"
+            icon="text"
+            variant="secondary"
+            onPress={() => onEditClip(selectedClip.id)}
+            style={{ flex: 1 }}
+          />
+          <Button
+            label="Delete"
+            icon="trash-outline"
+            variant="danger"
+            onPress={() => handleDeleteClip(selectedClip.id)}
+            style={{ flex: 1 }}
+          />
+        </View>
+      ) : null}
 
       <View style={[styles.ruler, { borderColor: colors.border }]}>
         <Text style={[typography.caption, { color: colors.textMuted }]}>0:00</Text>
@@ -146,8 +200,9 @@ export function TimelineEditor({
               isDragging={draggingId === clip.id}
               isDropTarget={dragOverIndex === index && draggingId !== clip.id}
               onSelect={() => setSelectedClipId(clip.id)}
-              onEdit={() => onEditClip(clip.id)}
               onDelete={() => handleDeleteClip(clip.id)}
+              onTrimStart={(startMs) => onUpdateClip(clip.id, { trimStartMs: startMs })}
+              onTrimEnd={(endMs) => onUpdateClip(clip.id, { trimEndMs: endMs })}
               onDragStart={() => setDraggingId(clip.id)}
               onDragMove={(dx) => {
                 const fromIndex = session.clips.findIndex((c) => c.id === clip.id);
@@ -218,7 +273,7 @@ export function TimelineEditor({
       </ScrollView>
 
       <Text style={[typography.caption, { color: colors.textMuted, paddingHorizontal: spacing.md, marginTop: 8 }]}>
-        Drag the handle on a clip to reorder · Tap clip to edit
+        Drag clip edges to trim · bottom handle to reorder · Split at playhead
       </Text>
 
       <View style={[styles.toolbar, { borderTopColor: colors.border, padding: spacing.md, backgroundColor: colors.surface }]}>
@@ -256,8 +311,9 @@ type TimelineClipBlockProps = {
   isDragging: boolean;
   isDropTarget: boolean;
   onSelect: () => void;
-  onEdit: () => void;
   onDelete: () => void;
+  onTrimStart: (startMs: number) => void;
+  onTrimEnd: (endMs: number) => void;
   onDragStart: () => void;
   onDragMove: (dx: number) => void;
   onDragEnd: (dx: number) => void;
@@ -266,20 +322,77 @@ type TimelineClipBlockProps = {
 function TimelineClipBlock({
   clip,
   index,
-  width,
+  width: propWidth,
   selected,
   isDragging,
   isDropTarget,
   onSelect,
-  onEdit,
   onDelete,
+  onTrimStart,
+  onTrimEnd,
   onDragStart,
   onDragMove,
   onDragEnd,
 }: TimelineClipBlockProps) {
   const { colors, typography, radius } = useThemeWithSpacing();
+  const trimStartRef = useRef(clip.trimStartMs);
+  const trimEndRef = useRef(clip.trimEndMs);
+  const [previewStart, setPreviewStart] = useState<number | null>(null);
+  const [previewEnd, setPreviewEnd] = useState<number | null>(null);
 
-  const panResponder = useMemo(
+  const displayClip: Clip =
+    previewStart !== null || previewEnd !== null
+      ? {
+          ...clip,
+          trimStartMs: previewStart ?? clip.trimStartMs,
+          trimEndMs: previewEnd ?? clip.trimEndMs,
+        }
+      : clip;
+  const width = clipWidth(displayClip);
+
+  const leftTrimPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => clip.type === 'video',
+        onMoveShouldSetPanResponder: () => clip.type === 'video',
+        onPanResponderGrant: () => {
+          trimStartRef.current = clip.trimStartMs;
+        },
+        onPanResponderMove: (_, gesture) => {
+          const next = clampTrimStart(clip, trimStartRef.current + msFromDx(gesture.dx));
+          setPreviewStart(next);
+        },
+        onPanResponderRelease: (_, gesture) => {
+          const next = clampTrimStart(clip, trimStartRef.current + msFromDx(gesture.dx));
+          setPreviewStart(null);
+          onTrimStart(next);
+        },
+      }),
+    [clip, onTrimStart],
+  );
+
+  const rightTrimPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => clip.type === 'video',
+        onMoveShouldSetPanResponder: () => clip.type === 'video',
+        onPanResponderGrant: () => {
+          trimEndRef.current = clip.trimEndMs > 0 ? clip.trimEndMs : clip.durationMs;
+        },
+        onPanResponderMove: (_, gesture) => {
+          const next = clampTrimEnd(clip, trimEndRef.current + msFromDx(gesture.dx));
+          setPreviewEnd(next);
+        },
+        onPanResponderRelease: (_, gesture) => {
+          const next = clampTrimEnd(clip, trimEndRef.current + msFromDx(gesture.dx));
+          setPreviewEnd(null);
+          onTrimEnd(next);
+        },
+      }),
+    [clip, onTrimEnd],
+  );
+
+  const reorderPan = useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
@@ -308,6 +421,21 @@ function TimelineClipBlock({
           transform: isDragging ? [{ scale: 1.03 }] : [],
         },
       ]}>
+      {clip.type === 'video' ? (
+        <>
+          <View
+            {...leftTrimPan.panHandlers}
+            style={[styles.trimHandle, styles.trimLeft, { backgroundColor: colors.accent }]}>
+            <View style={styles.trimGrip} />
+          </View>
+          <View
+            {...rightTrimPan.panHandlers}
+            style={[styles.trimHandle, styles.trimRight, { backgroundColor: colors.accent }]}>
+            <View style={styles.trimGrip} />
+          </View>
+        </>
+      ) : null}
+
       <Pressable onPress={onSelect} style={styles.clipBody}>
         <View style={[styles.clipThumb, { backgroundColor: colors.surfaceSecondary }]}>
           <Ionicons
@@ -318,7 +446,7 @@ function TimelineClipBlock({
         </View>
         <Text style={[typography.caption, { color: colors.text, fontWeight: '600' }]}>Clip {index + 1}</Text>
         <Text style={[typography.caption, { color: colors.textMuted }]}>
-          {formatDuration(getClipDurationMs(clip))}
+          {formatDuration(getClipDurationMs(displayClip))}
         </Text>
       </Pressable>
 
@@ -329,11 +457,7 @@ function TimelineClipBlock({
         <Ionicons name="close" size={12} color="#fff" />
       </Pressable>
 
-      <Pressable onPress={onEdit} hitSlop={8} style={[styles.clipEdit, { backgroundColor: colors.surfaceSecondary }]}>
-        <Ionicons name="pencil" size={11} color={colors.textSecondary} />
-      </Pressable>
-
-      <View {...panResponder.panHandlers} style={[styles.dragHandle, { backgroundColor: colors.surfaceSecondary }]}>
+      <View {...reorderPan.panHandlers} style={[styles.dragHandle, { backgroundColor: colors.surfaceSecondary }]}>
         <Ionicons name="reorder-three" size={16} color={colors.textSecondary} />
       </View>
     </View>
@@ -352,6 +476,10 @@ const styles = StyleSheet.create({
     height: 200,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  editBar: {
+    flexDirection: 'row',
+    gap: 8,
   },
   ruler: {
     flexDirection: 'row',
@@ -418,6 +546,7 @@ const styles = StyleSheet.create({
   clipBody: {
     flex: 1,
     padding: 8,
+    paddingHorizontal: HANDLE_WIDTH + 4,
     paddingRight: 28,
   },
   clipThumb: {
@@ -439,26 +568,38 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 2,
   },
-  clipEdit: {
-    position: 'absolute',
-    top: 4,
-    right: 28,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 2,
-  },
   dragHandle: {
     position: 'absolute',
     bottom: 0,
-    left: 0,
-    right: 0,
+    left: HANDLE_WIDTH,
+    right: HANDLE_WIDTH,
     height: 22,
     alignItems: 'center',
     justifyContent: 'center',
     borderBottomLeftRadius: 6,
     borderBottomRightRadius: 6,
+  },
+  trimHandle: {
+    position: 'absolute',
+    top: 0,
+    bottom: 22,
+    width: HANDLE_WIDTH,
+    zIndex: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trimLeft: {
+    left: 0,
+    borderTopLeftRadius: 6,
+  },
+  trimRight: {
+    right: 0,
+    borderTopRightRadius: 6,
+  },
+  trimGrip: {
+    width: 3,
+    height: 20,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.85)',
   },
 });

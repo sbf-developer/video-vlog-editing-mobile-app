@@ -1,10 +1,10 @@
 import type { Clip } from './types';
+import { getClipBounds } from './videoMeta';
 
 const IMAGE_DURATION_MS = 3000;
 
 export function getClipDurationMs(clip: Clip): number {
-  if (clip.type === 'image') return IMAGE_DURATION_MS;
-  return Math.max(0, clip.trimEndMs - clip.trimStartMs);
+  return getClipBounds(clip).durationMs;
 }
 
 function getEffectiveDuration(clip: Clip): number {

@@ -6,7 +6,7 @@ import { useState } from 'react';
 import { Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { TimelineEditor } from '@/components/TimelineEditor';
-import { Input } from '@/components/ui/Button';
+import { Button, Input } from '@/components/ui/Button';
 import { useVlog } from '@/context/VlogContext';
 import { useThemeWithSpacing } from '@/hooks/useTheme';
 
@@ -20,6 +20,9 @@ export default function SessionScreen() {
     addClipFromUri,
     addAudioFromUri,
     removeAudioTrack,
+    updateClip,
+    splitClip,
+    loading,
   } = useVlog();
   const { colors, spacing, typography } = useThemeWithSpacing();
   const [editingName, setEditingName] = useState(false);
@@ -27,10 +30,26 @@ export default function SessionScreen() {
 
   const session = getSession(id);
 
+  if (loading) {
+    return (
+      <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
+        <Text style={[typography.body, { color: colors.textSecondary, padding: spacing.md }]}>
+          Loading…
+        </Text>
+      </SafeAreaView>
+    );
+  }
+
   if (!session) {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
-        <Text style={[typography.body, { color: colors.text, padding: spacing.md }]}>Session not found.</Text>
+        <View style={{ padding: spacing.md, gap: spacing.md }}>
+          <Text style={[typography.body, { color: colors.text }]}>Session not found.</Text>
+          <Text style={[typography.caption, { color: colors.textMuted }]}>
+            It may have been deleted, or this link is from an old browser tab.
+          </Text>
+          <Button label="Back to home" onPress={() => router.replace('/')} />
+        </View>
       </SafeAreaView>
     );
   }
@@ -106,6 +125,8 @@ export default function SessionScreen() {
         <TimelineEditor
           session={session}
           onEditClip={(clipId) => router.push(`/session/${session.id}/edit/${clipId}`)}
+          onUpdateClip={(clipId, updates) => updateClip(session.id, clipId, updates)}
+          onSplitClip={(clipId, splitAt) => splitClip(session.id, clipId, splitAt)}
           onDeleteClip={(clipId) => removeClip(session.id, clipId)}
           onReorderClips={(clipIds) => reorderClips(session.id, clipIds)}
           onDeleteAudio={(trackId) => removeAudioTrack(session.id, trackId)}
